@@ -1,3 +1,2 @@
-pyautogui>=0.9.54
 evdev>=1.6.1
 PySide6-Essentials>=6.7

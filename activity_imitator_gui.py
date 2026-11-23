@@ -6,8 +6,9 @@ A friendly front-end for activity_imitator.py: one big start/stop ring with a
 countdown to the next action, live status, stats, an event log, an auto-stop
 timer, settings and a system-tray icon.
 
-The input-simulation core (Bezier mouse motion, safe keys, evdev hotkeys) is
-reused from activity_imitator.py unchanged; the CLI still works on its own.
+The input-simulation core (uinput virtual devices, Bezier mouse motion, safe
+keys, evdev hotkeys and user-activity detection) lives in activity_imitator.py;
+the CLI still works on its own.
 """
 
 from __future__ import annotations
@@ -46,14 +47,11 @@ HERE = Path(__file__).resolve().parent
 ICON_PATH = HERE / "assets" / "activity-imitator.svg"
 CONFIG_PATH = Path.home() / ".config" / APP_ID / "settings.json"
 
-# The core imports pyautogui, which needs an X/XWayland display. Import it
-# defensively so the window can still explain what went wrong.
+# Import the core defensively so the window can still explain what went wrong.
 try:
-    import pyautogui
     import activity_imitator as core
     CORE_ERROR = None
 except Exception as exc:  # pragma: no cover - environment dependent
-    pyautogui = None
     core = None
     CORE_ERROR = f"{type(exc).__name__}: {exc}"
 
@@ -74,13 +72,15 @@ AMBER = "#fbbf24"
 ROSE = "#fb7185"
 GREEN = "#34d399"
 SLATE = "#64748b"
+BLUE = "#60a5fa"
 
-STATUS_COLORS = {"running": GREEN, "paused": AMBER, "stopped": SLATE, "error": ROSE}
-STATUS_TEXT = {"running": "Активний", "paused": "Пауза", "stopped": "Зупинено", "error": "Недоступно"}
+STATUS_COLORS = {"running": GREEN, "waiting": BLUE, "paused": AMBER, "stopped": SLATE, "error": ROSE}
+STATUS_TEXT = {"running": "Активний", "waiting": "Автопауза", "paused": "Пауза",
+               "stopped": "Зупинено", "error": "Недоступно"}
 
 KIND_COLORS = {
     "mouse": CYAN, "click": VIOLET, "key": GREEN, "pause": SLATE,
-    "info": "#60a5fa", "warn": AMBER, "error": ROSE,
+    "info": "#94a3b8", "auto": BLUE, "warn": AMBER, "error": ROSE,
 }
 
 DURATIONS = [(0, "∞"), (30, "30 хв"), (60, "1 год"), (120, "2 год"), (240, "4 год"), (480, "8 год")]
@@ -103,6 +103,8 @@ class Settings:
     keys: bool = True
     pauses: bool = True
     duration_min: int = 0
+    auto_pause: bool = True
+    resume_after: int = 60
     autostart: bool = False
     close_to_tray: bool = True
     tray_hint_shown: bool = False
@@ -164,13 +166,15 @@ def fmt_ago(seconds: float) -> str:
 
 
 def describe_mouse(detail: str) -> tuple[str, str]:
-    m = re.match(r"move to \((\d+), (\d+)\)(?: \+ click \+ scroll\((-?\d+)\))?", detail)
+    if detail == "move interrupted":
+        return "auto", "Рух перервано — ви взялися за мишу"
+    m = re.match(r"move to \((\d+)%, (\d+)%\)(?: \+ click \+ scroll\((-?\d+)\))?", detail)
     if not m:
         return "mouse", detail
     x, y, ticks = m.groups()
     if ticks is None:
-        return "mouse", f"Рух миші → ({x}, {y})"
-    return "click", f"Рух → ({x}, {y}), клік і прокрутка {int(ticks):+d}"
+        return "mouse", f"Рух миші → {x}% × {y}% екрана"
+    return "click", f"Рух → {x}% × {y}%, клік і прокрутка {int(ticks):+d}"
 
 
 def mix(a: QColor, b: QColor, t: float) -> QColor:
@@ -195,6 +199,7 @@ def with_alpha(color: str, alpha: int) -> QColor:
 class ImitatorWorker(QObject):
     action = Signal(int, str, str)      # run_id, kind, text
     scheduled = Signal(int, float)      # run_id, delay seconds (starts now)
+    user_wait = Signal(int, float)      # run_id, seconds until resume (<0 = done)
     finished = Signal(int, str)         # run_id, reason
     hotkey_toggle = Signal()
     hotkey_stop = Signal()
@@ -206,9 +211,15 @@ class ImitatorWorker(QObject):
         self.run_id = 0
         self._stop_evt: threading.Event | None = None
         self.paused = False
-        self.simulator = core.InputSimulator(core.RandomizationEngine()) if core else None
+        self.activity_baseline = 0.0
+        self.init_error: str | None = None
+        self.simulator = None
         self.safety = None
         if core:
+            try:
+                self.simulator = core.InputSimulator(core.RandomizationEngine())
+            except Exception as exc:
+                self.init_error = str(exc)
             self.safety = core.SafetyListener(
                 on_pause_toggle=lambda _p: self.hotkey_toggle.emit(),
                 on_quit=self.hotkey_stop.emit,
@@ -217,13 +228,28 @@ class ImitatorWorker(QObject):
 
     @property
     def hotkeys_available(self) -> bool:
-        return bool(self.safety and self.safety.has_keyboards)
+        return bool(self.safety and self.safety.has_devices)
+
+    def user_wait_remaining(self) -> float:
+        """Seconds left until auto-pause ends (0 = the user is idle enough)."""
+        s = self.settings
+        if not (s.auto_pause and self.hotkeys_available):
+            return 0.0
+        last = self.safety.last_user_input
+        if last <= self.activity_baseline:
+            return 0.0
+        return max(0.0, s.resume_after - (time.monotonic() - last))
+
+    def _ignore_input_until_now(self, grace: float = 1.0) -> None:
+        # The click on "Start"/"Resume" itself must not trigger auto-pause.
+        self.activity_baseline = time.monotonic() + grace
 
     # -- control (GUI thread) ------------------------------------------------
     def start(self) -> int:
         self.request_stop()
         self.run_id += 1
         self.paused = False
+        self._ignore_input_until_now()
         self._stop_evt = threading.Event()
         threading.Thread(target=self._run, args=(self.run_id, self._stop_evt), daemon=True).start()
         return self.run_id
@@ -234,6 +260,8 @@ class ImitatorWorker(QObject):
             self._stop_evt = None
 
     def set_paused(self, paused: bool) -> None:
+        if self.paused and not paused:
+            self._ignore_input_until_now()
         self.paused = paused
         if self.safety:
             self.safety.paused = paused
@@ -242,6 +270,8 @@ class ImitatorWorker(QObject):
         self.request_stop()
         if self.safety:
             self.safety.stop()
+        if self.simulator:
+            self.simulator.close()
 
     # -- loop (worker thread) --------------------------------------------------
     def _wait(self, run_id: int, stop: threading.Event, delay: float) -> str:
@@ -252,6 +282,8 @@ class ImitatorWorker(QObject):
                 return "stopped"
             if self.paused:
                 return "paused"
+            if self.user_wait_remaining() > 0:
+                return "user"
             stop.wait(max(0.0, min(0.1, end - time.monotonic())))
         return "stopped" if stop.is_set() else "done"
 
@@ -283,6 +315,21 @@ class ImitatorWorker(QObject):
                         break
                     delay = random.uniform(2.0, 4.0)
                     continue
+                if outcome == "user":
+                    self.action.emit(run_id, "auto", "Автопауза: ви користуєтесь комп'ютером")
+                    while not stop.is_set() and not self.paused:
+                        rem = self.user_wait_remaining()
+                        if rem <= 0:
+                            break
+                        self.user_wait.emit(run_id, rem)
+                        stop.wait(0.25)
+                    self.user_wait.emit(run_id, -1.0)
+                    if stop.is_set():
+                        break
+                    if not self.paused:
+                        self.action.emit(run_id, "auto", "Ви неактивні — продовжую")
+                    delay = random.uniform(1.5, 3.0)
+                    continue
 
                 s = self.settings
                 choice = self._pick(s)
@@ -294,8 +341,10 @@ class ImitatorWorker(QObject):
                 self.guard_until = float("inf")
                 try:
                     if choice == "mouse":
-                        kind, text = describe_mouse(
-                            self.simulator.move_mouse(click_chance=0.25 if s.clicks else 0.0))
+                        kind, text = describe_mouse(self.simulator.move_mouse(
+                            click_chance=0.25 if s.clicks else 0.0,
+                            should_abort=lambda: stop.is_set() or self.paused
+                            or self.user_wait_remaining() > 0))
                     elif choice == "navigation":
                         key = self.simulator.navigation_keystroke()
                         kind, text = "key", f"Клавіша {KEY_NAMES.get(key, key)}"
@@ -312,10 +361,7 @@ class ImitatorWorker(QObject):
                 lo, hi = sorted((s.min_delay, s.max_delay))
                 delay = random.uniform(lo, hi)
         except Exception as exc:
-            if pyautogui and isinstance(exc, pyautogui.FailSafeException):
-                reason = "failsafe"
-            else:
-                reason = f"error:{exc}"
+            reason = f"error:{exc}"
         finally:
             self.guard_until = time.monotonic() + SYNTHETIC_GUARD_S
             self.finished.emit(run_id, reason)
@@ -354,6 +400,8 @@ class PowerRing(QAbstractButton):
         self.status = "stopped"
         self.remaining_fraction = 0.0
         self.remaining_s: float | None = None
+        self.wait_fraction = 0.0
+        self.wait_s: float | None = None
         self.phase = 0.0
         self._hover = 0.0
         self._hover_anim = QPropertyAnimation(self, b"hover", self)
@@ -390,10 +438,10 @@ class PowerRing(QAbstractButton):
         color = QColor(STATUS_COLORS.get(status, SLATE))
 
         # breathing glow
-        if status in ("running", "paused"):
+        if status in ("running", "paused", "waiting"):
             breath = 0.5 + 0.5 * math.sin(self.phase) if status == "running" else 0.35
             glow = QRadialGradient(c, w / 2)
-            base = QColor(CYAN if status == "running" else AMBER)
+            base = QColor({"running": CYAN, "paused": AMBER, "waiting": BLUE}[status])
             glow.setColorAt(0.55, with_alpha(base.name(), int(40 + 45 * breath)))
             glow.setColorAt(1.0, with_alpha(base.name(), 0))
             p.setPen(Qt.PenStyle.NoPen)
@@ -419,6 +467,9 @@ class PowerRing(QAbstractButton):
         elif status == "paused":
             p.setPen(QPen(with_alpha(AMBER, 120), 9))
             p.drawEllipse(ring)
+        elif status == "waiting" and self.wait_fraction > 0.002:
+            p.setPen(QPen(QColor(BLUE), 9, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawArc(ring, 90 * 16, int(-self.wait_fraction * 360 * 16))
 
         # inner disc
         disc_r = 74 + 2 * self._hover
@@ -432,23 +483,22 @@ class PowerRing(QAbstractButton):
         p.drawEllipse(disc)
 
         # content
-        if status == "running":
-            if self.remaining_s is None:
-                big = "…"
-            else:
-                big = str(max(0, int(round(self.remaining_s))))
+        if status in ("running", "waiting"):
+            waiting = status == "waiting"
+            value = self.wait_s if waiting else self.remaining_s
+            big = "…" if value is None else str(max(0, int(math.ceil(value) if waiting else round(value))))
             f = QFont(self.font())
             f.setPixelSize(50)
             f.setWeight(QFont.Weight.DemiBold)
             p.setFont(f)
-            p.setPen(QColor(TEXT))
+            p.setPen(QColor(BLUE if waiting else TEXT))
             p.drawText(QRectF(disc.x(), c.y() - 44, disc.width(), 56), Qt.AlignmentFlag.AlignCenter, big)
             f2 = QFont(self.font())
             f2.setPixelSize(12)
             p.setFont(f2)
             p.setPen(QColor(MUTED))
             p.drawText(QRectF(disc.x(), c.y() + 12, disc.width(), 18), Qt.AlignmentFlag.AlignCenter,
-                       "с до наступної дії")
+                       "с до продовження" if waiting else "с до наступної дії")
             p.setPen(with_alpha(MUTED, int(110 + 140 * self._hover)))
             f2.setPixelSize(11)
             p.setFont(f2)
@@ -694,13 +744,18 @@ class MainWindow(QWidget):
         self.last_action: tuple[float, str] | None = None
         self.next_at: float | None = None
         self.next_delay = 0.0
+        self.user_wait_until: float | None = None
         self._quitting = False
         self._frozen_runtime = 0.0
 
         self.worker = ImitatorWorker(self.settings) if core else None
+        self.init_error = CORE_ERROR or (self.worker.init_error if self.worker else None)
+        if self.init_error:
+            self.status = "error"
         if self.worker:
             self.worker.action.connect(self._on_action)
             self.worker.scheduled.connect(self._on_scheduled)
+            self.worker.user_wait.connect(self._on_user_wait)
             self.worker.finished.connect(self._on_finished)
             self.worker.hotkey_toggle.connect(self._on_hotkey_toggle)
             self.worker.hotkey_stop.connect(lambda: self.stop("hotkey"))
@@ -727,11 +782,12 @@ class MainWindow(QWidget):
 
         if CORE_ERROR:
             self.log("error", f"Ядро не завантажилось: {CORE_ERROR}")
-            self.log("info", "Потрібен X11/XWayland (змінна DISPLAY) для керування мишею")
+        elif self.init_error:
+            self.log("error", self.init_error)
         else:
             self.log("info", "Готово до запуску")
             if self.worker and not self.worker.hotkeys_available:
-                self.log("warn", "Гарячі клавіші недоступні: немає доступу до /dev/input")
+                self.log("warn", "Гарячі клавіші й автопауза недоступні: немає доступу до /dev/input")
             if self.settings.autostart:
                 QTimer.singleShot(600, self.start)
 
@@ -766,7 +822,7 @@ class MainWindow(QWidget):
         hero.setSpacing(8)
         self.ring = PowerRing()
         self.ring.clicked.connect(self.toggle_run)
-        self.ring.setEnabled(core is not None)
+        self.ring.setEnabled(not self.init_error)
         hero.addWidget(self.ring, 0, Qt.AlignmentFlag.AlignHCenter)
         self.last_label = QLabel(" ")
         self.last_label.setObjectName("lastAction")
@@ -856,17 +912,18 @@ class MainWindow(QWidget):
         self.hotkey_state = QLabel()
         self.hotkey_state.setObjectName("footer")
         ok = bool(self.worker and self.worker.hotkeys_available)
-        self.hotkey_state.setText(("● " if ok else "▲ ") + ("гарячі клавіші активні" if ok else "гарячі клавіші вимкнено"))
+        self.hotkey_state.setText(("● " if ok else "▲ ") + ("клавіші й автопауза активні" if ok else "клавіші й автопауза вимкнені"))
         self.hotkey_state.setStyleSheet(f"color: {GREEN if ok else AMBER};")
         self.hotkey_state.setToolTip(
-            "Глобальні клавіші читаються з /dev/input (evdev)." if ok else
+            "Клавіатура, миша й тачпад читаються з /dev/input (evdev) — для гарячих клавіш і автопаузи." if ok else
             "Немає доступу до /dev/input. Додайте користувача до групи input:\n"
             "sudo usermod -aG input $USER — і перезайдіть у сесію.")
         footer.addWidget(self.hotkey_state)
         root.addLayout(footer)
-        corner = QLabel("Курсор у будь-який кут екрана — аварійна зупинка")
-        corner.setObjectName("footerFaint")
-        root.addWidget(corner)
+        self.footer_hint = QLabel()
+        self.footer_hint.setObjectName("footerFaint")
+        root.addWidget(self.footer_hint)
+        self._sync_settings_ui()
 
     def _build_log(self) -> QWidget:
         card = make_card()
@@ -957,6 +1014,39 @@ class MainWindow(QWidget):
         self.max_slider.valueChanged.connect(self._on_max)
         v.addWidget(ic)
 
+        # auto-pause card
+        apc = make_card()
+        apl = QVBoxLayout(apc)
+        apl.setContentsMargins(0, 4, 0, 10)
+        apl.setSpacing(0)
+        self.t_autopause = Toggle(self.settings.auto_pause)
+        apl.addWidget(self._row("Автопауза, коли ви працюєте",
+                                "Рух миші, тачпад чи клавіші одразу ставлять імітацію на паузу", self.t_autopause))
+        res = QWidget()
+        rl = QHBoxLayout(res)
+        rl.setContentsMargins(16, 0, 16, 0)
+        rl.setSpacing(12)
+        rlab = QLabel("продовжити через")
+        rlab.setObjectName("rowSub")
+        self.resume_slider = NoWheelSlider(Qt.Orientation.Horizontal)
+        self.resume_slider.setRange(2, 60)   # x5 seconds -> 10..300 s
+        self.resume_slider.setValue(max(2, min(60, round(self.settings.resume_after / 5))))
+        self.resume_slider.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.resume_value = QLabel()
+        self.resume_value.setObjectName("accentValue")
+        self.resume_value.setMinimumWidth(56)
+        self.resume_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        rl.addWidget(rlab)
+        rl.addWidget(self.resume_slider, 1)
+        rl.addWidget(self.resume_value)
+        apl.addWidget(res)
+        self.t_autopause.toggled.connect(lambda c: self._set("auto_pause", c))
+        self.resume_slider.valueChanged.connect(lambda v: self._set("resume_after", v * 5))
+        if not (self.worker and self.worker.hotkeys_available):
+            self.t_autopause.setEnabled(False)
+            self.resume_slider.setEnabled(False)
+        v.addWidget(apc)
+
         # actions card
         ac = make_card()
         al = QVBoxLayout(ac)
@@ -1043,6 +1133,14 @@ class MainWindow(QWidget):
     def _sync_settings_ui(self):
         self.interval_value.setText(f"{self.settings.min_delay}–{self.settings.max_delay} с")
         self.t_clicks.setEnabled(self.settings.mouse)
+        self.resume_value.setText(fmt_human(self.settings.resume_after) if self.settings.resume_after >= 60
+                                  and self.settings.resume_after % 60 == 0 else f"{self.settings.resume_after} с")
+        ap = self.settings.auto_pause and bool(self.worker and self.worker.hotkeys_available)
+        self.resume_slider.setEnabled(ap)
+        if hasattr(self, "footer_hint"):
+            self.footer_hint.setText(
+                "Візьметеся за мишу чи клавіатуру — імітація сама стане на паузу" if ap
+                else "Автопаузу вимкнено — зупиняйте кнопкою або Ctrl+Alt+Q")
 
     def _on_duration(self, minutes: int):
         self.settings.duration_min = minutes
@@ -1070,6 +1168,7 @@ class MainWindow(QWidget):
         self.action_count = 0
         self.last_action = None
         self.next_at = None
+        self.user_wait_until = None
         m = self.settings.duration_min
         self.deadline = datetime.now() + timedelta(minutes=m) if m else None
         self.status = "running"
@@ -1095,6 +1194,7 @@ class MainWindow(QWidget):
     def _finish_run(self):
         self.status = "stopped"
         self.next_at = None
+        self.user_wait_until = None
         if self.paused_since is not None:
             self.paused_total += time.monotonic() - self.paused_since
             self.paused_since = None
@@ -1117,6 +1217,7 @@ class MainWindow(QWidget):
             self.status = "paused"
             self.paused_since = time.monotonic()
             self.next_at = None
+            self.user_wait_until = None
             self.log("warn", "Пауза" + (f" ({source})" if source else ""))
         elif not paused and self.status == "paused":
             self.status = "running"
@@ -1139,7 +1240,7 @@ class MainWindow(QWidget):
     def _on_action(self, run_id: int, kind: str, text: str):
         if run_id != self.run_id or self.status == "stopped":
             return
-        if kind not in ("warn", "error", "info"):
+        if kind not in ("warn", "error", "info", "auto"):
             self.action_count += 1
             self.last_action = (time.monotonic(), text)
         self.log(kind, text)
@@ -1151,6 +1252,16 @@ class MainWindow(QWidget):
         self.next_delay = delay
         self.next_at = time.monotonic() + delay
 
+    def _on_user_wait(self, run_id: int, remaining: float):
+        if run_id != self.run_id or self.status != "running":
+            return
+        was = self.user_wait_until is not None
+        self.user_wait_until = None if remaining < 0 else time.monotonic() + remaining
+        if remaining >= 0:
+            self.next_at = None
+        if was != (self.user_wait_until is not None):
+            self._apply_status()
+
     def _on_finished(self, run_id: int, reason: str):
         if run_id != self.run_id:
             return
@@ -1159,10 +1270,7 @@ class MainWindow(QWidget):
         if self.status == "stopped":
             return
         self._finish_run()
-        if reason == "failsafe":
-            self.log("error", "Аварійна зупинка: курсор у куті екрана")
-            self.notify("Аварійна зупинка", "Курсор опинився в куті екрана — імітацію зупинено.")
-        elif reason.startswith("error:"):
+        if reason.startswith("error:"):
             self.log("error", f"Помилка: {reason[6:]}")
             self.notify("Помилка", reason[6:])
 
@@ -1175,24 +1283,30 @@ class MainWindow(QWidget):
             paused += time.monotonic() - self.paused_since
         return time.monotonic() - self.run_started - paused
 
+    def display_status(self) -> str:
+        if self.status == "running" and self.user_wait_until is not None:
+            return "waiting"
+        return self.status
+
     def _apply_status(self):
-        s = self.status
+        s = self.display_status()
         self.pill.set_status(s)
         self.ring.status = s
-        self.ring.setToolTip({"running": "Зупинити", "paused": "Зупинити", "stopped": "Запустити"}.get(s, CORE_ERROR or ""))
-        self.pause_btn.setEnabled(s in ("running", "paused"))
+        self.ring.setToolTip({"running": "Зупинити", "waiting": "Зупинити", "paused": "Зупинити",
+                              "stopped": "Запустити"}.get(s, self.init_error or ""))
+        self.pause_btn.setEnabled(s in ("running", "waiting", "paused"))
         self.pause_btn.setText("Продовжити" if s == "paused" else "Пауза")
         self.pause_btn.setProperty("accent", s == "paused")
         self.pause_btn.style().unpolish(self.pause_btn)
         self.pause_btn.style().polish(self.pause_btn)
         if self.tray:
-            dot = {"running": GREEN, "paused": AMBER, "error": ROSE}.get(s)
+            dot = {"running": GREEN, "waiting": BLUE, "paused": AMBER, "error": ROSE}.get(s)
             self.tray.setIcon(icon_with_dot(self.app_icon, dot))
             self.tray_status.setText(f"{APP_NAME}: {STATUS_TEXT[s].lower()}")
-            self.tray_run.setText("Зупинити" if s in ("running", "paused") else "Запустити")
+            self.tray_run.setText("Зупинити" if s in ("running", "waiting", "paused") else "Запустити")
             self.tray_run.setEnabled(s != "error")
             self.tray_pause.setText("Продовжити" if s == "paused" else "Пауза")
-            self.tray_pause.setEnabled(s in ("running", "paused"))
+            self.tray_pause.setEnabled(s in ("running", "waiting", "paused"))
         self.setWindowTitle(f"{APP_NAME} — {STATUS_TEXT[s]}")
         self.ring.update()
         self._tick_slow()
@@ -1207,6 +1321,13 @@ class MainWindow(QWidget):
         else:
             self.ring.remaining_s = None
             self.ring.remaining_fraction = 0.0
+        if self.user_wait_until is not None:
+            rem = max(0.0, self.user_wait_until - time.monotonic())
+            self.ring.wait_s = rem
+            self.ring.wait_fraction = min(1.0, rem / max(1, self.settings.resume_after))
+        else:
+            self.ring.wait_s = None
+            self.ring.wait_fraction = 0.0
         if self.status in ("running", "paused") or self.ring.underMouse():
             self.ring.update()
         if self.status == "running":
@@ -1219,7 +1340,8 @@ class MainWindow(QWidget):
 
         runtime = self._runtime()
         self.stat_time.value.setText(fmt_duration(runtime))
-        self.stat_time.sub.setText({"running": "триває", "paused": "на паузі"}.get(self.status, "остання сесія" if runtime else " "))
+        self.stat_time.sub.setText({"running": "триває", "waiting": "автопауза", "paused": "на паузі"}.get(
+            self.display_status(), "остання сесія" if runtime else " "))
         self.stat_actions.value.setText(str(self.action_count))
         self.stat_actions.sub.setText("за сесію")
         if self.status in ("running", "paused") and self.deadline:
@@ -1235,6 +1357,8 @@ class MainWindow(QWidget):
 
         if self.status == "error":
             self.last_label.setText("Імітація недоступна — див. журнал")
+        elif self.display_status() == "waiting":
+            self.last_label.setText("Ви за комп'ютером — продовжу, щойно відійдете")
         elif self.last_action and self.status != "stopped":
             at, text = self.last_action
             self.last_label.setText(f"{text}  ·  {fmt_ago(time.monotonic() - at)}")
@@ -1246,8 +1370,10 @@ class MainWindow(QWidget):
             self.last_label.setText("Натисніть кнопку, щоб почати")
 
         if self.tray:
-            tip = f"{APP_NAME} — {STATUS_TEXT[self.status]}"
-            if self.status == "running" and self.next_at:
+            tip = f"{APP_NAME} — {STATUS_TEXT[self.display_status()]}"
+            if self.user_wait_until is not None:
+                tip += f"\nПродовжу через {max(0, int(math.ceil(self.user_wait_until - time.monotonic())))} с бездіяльності"
+            elif self.status == "running" and self.next_at:
                 tip += f"\nНаступна дія через {max(0, int(self.next_at - time.monotonic()))} с"
             if self.status in ("running", "paused"):
                 tip += f"\nДій: {self.action_count} · {fmt_duration(runtime)}"
