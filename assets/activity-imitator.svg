@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1e1b4b"/>
+      <stop offset="1" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="pulse" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.15"/>
+      <stop offset="0.5" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+    <linearGradient id="cursor" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e2e8f0"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#000" flood-opacity="0.5"/>
+    </filter>
+  </defs>
+  <rect x="12" y="12" width="232" height="232" rx="52" fill="url(#bg)"/>
+  <rect x="12.5" y="12.5" width="231" height="231" rx="51.5" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
+  <!-- heartbeat / keep-alive pulse -->
+  <polyline points="34,150 78,150 96,150 112,104 132,190 150,126 162,150 222,150"
+            fill="none" stroke="url(#pulse)" stroke-width="10"
+            stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+  <!-- motion ripples -->
+  <circle cx="150" cy="76" r="20" fill="none" stroke="#a78bfa" stroke-opacity="0.55" stroke-width="4"/>
+  <circle cx="150" cy="76" r="34" fill="none" stroke="#a78bfa" stroke-opacity="0.25" stroke-width="3"/>
+  <!-- mouse cursor -->
+  <path d="M150 76 L150 160 L170 141 L184 172 L198 166 L184 135 L210 133 Z"
+        fill="url(#cursor)" stroke="#0f172a" stroke-width="6" stroke-linejoin="round" filter="url(#shadow)"/>
+</svg>

@@ -132,7 +132,7 @@ class InputSimulator:
             path.append((x, y))
         return path
 
-    def move_mouse(self) -> str:
+    def move_mouse(self, click_chance: float = 0.25) -> str:
         start = pyautogui.position()
         end = self.engine.random_point_in_box(self.box)
         distance = math.hypot(end[0] - start[0], end[1] - start[1])
@@ -147,7 +147,7 @@ class InputSimulator:
 
         detail = f"move to ({end[0]}, {end[1]})"
 
-        if random.random() < 0.25:
+        if random.random() < click_chance:
             pyautogui.click()
             time.sleep(random.uniform(0.1, 0.3))
             ticks = random.choice([-2, -1, 1, 2])
@@ -195,9 +195,12 @@ class SafetyListener:
         ecodes.KEY_LEFTALT, ecodes.KEY_RIGHTALT,
     )
 
-    def __init__(self):
+    def __init__(self, on_pause_toggle=None, on_quit=None):
         self.paused = False
         self.should_quit = False
+        # Optional callbacks (used by the GUI); called from the listener thread.
+        self.on_pause_toggle = on_pause_toggle
+        self.on_quit = on_quit
         self._pressed = set()
         self._hotkey_fired = False
         self._devices = self._find_keyboards()
@@ -218,6 +221,10 @@ class SafetyListener:
             if ecodes.KEY_A in caps and ecodes.KEY_Z in caps:
                 devices.append(dev)
         return devices
+
+    @property
+    def has_keyboards(self) -> bool:
+        return bool(self._devices)
 
     def start(self):
         if not self._devices:
@@ -271,10 +278,14 @@ class SafetyListener:
                 self._hotkey_fired = True
                 self.paused = not self.paused
                 log(f"Hotkey Ctrl+Alt+S -> {'PAUSED' if self.paused else 'RESUMED'}")
+                if self.on_pause_toggle:
+                    self.on_pause_toggle(self.paused)
             elif ecodes.KEY_Q in self._pressed:
                 self._hotkey_fired = True
                 log("Hotkey Ctrl+Alt+Q -> quit requested")
                 self.should_quit = True
+                if self.on_quit:
+                    self.on_quit()
 
 
 # ---------------------------------------------------------------------------
