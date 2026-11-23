@@ -3,8 +3,8 @@
 ## Done
 - v1–v3: console imitator, PySide6 GUI, uinput input with auto-pause (tags `v1-console`,
   `v2-gui-xtest`, `v3-uinput`).
-- Agentic setup: `AGENTS.md`, `make verify`/`make check`, doc-sync tests, guard hooks,
-  runbooks, skills, ADRs, size and coverage ratchets.
+- Agentic setup (branch agentic-setup, merged 2026-11-23): `AGENTS.md`, `make verify`/`make check`,
+  doc-sync tests, guard hooks, runbooks, skills, ADRs, size and coverage ratchets.
 - Fixed: the listener thread died on the first device read error (`evdev.error` does not exist).
 
 ## In progress
