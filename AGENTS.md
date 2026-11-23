@@ -32,6 +32,7 @@ make check          # what CI runs; must be green before merging to main
 | Check real cursor/keys on the desktop | `docs/runbooks/manual-desktop-check.md` |
 | Install or change the desktop launcher | `docs/runbooks/install-launcher.md` |
 | Release a version, roll back | `docs/runbooks/release-and-rollback.md` |
+| Merge a finished branch into main | `docs/runbooks/merge-branch.md` |
 | Current state, next work | `docs/STATUS.md`, `docs/ROADMAP.md` |
 | Why things are as they are | `docs/decisions/` |
 | Known traps | `docs/gotchas.md` |
