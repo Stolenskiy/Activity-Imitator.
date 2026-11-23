@@ -1,0 +1,5 @@
+# Legacy files over the 300-line source limit (ADR 0006). Ratchet: entries may only be
+# lowered or removed, never added or raised, and must equal the file's current line count.
+# Checked by tests/unit/test_ratchets.py. Format: <path> <lines>
+activity_imitator.py 528
+activity_imitator_gui.py 1580

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Activity Imitator
+Comment=Keep the session alive with randomized mouse/keyboard activity
+Exec=@LAUNCHER@
+Path=@REPO@
+Icon=@ICON@
+Terminal=false
+Categories=Utility;
+StartupNotify=true
+StartupWMClass=activity-imitator
