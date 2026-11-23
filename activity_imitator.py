@@ -68,6 +68,13 @@ SAFE_KEYS = [
     "esc",
 ]
 
+# Global hotkeys (all Ctrl+Alt+<letter>) -> action id. Source of truth for the
+# README hotkey table (checked by tests/unit/test_doc_sync_code.py).
+HOTKEYS = {
+    "Ctrl+Alt+S": "pause",
+    "Ctrl+Alt+Q": "quit",
+}
+
 # Name prefix of our own virtual devices; the activity listener ignores them
 # so the imitator never "sees" its own input as user activity.
 VIRTUAL_DEVICE_PREFIX = "Activity Imitator virtual"
@@ -310,6 +317,8 @@ class SafetyListener:
     """
 
     RESCAN_SECONDS = 5.0
+    HOTKEY_CODES = {getattr(ecodes, "KEY_" + combo.rsplit("+", 1)[1]): action
+                    for combo, action in HOTKEYS.items()}
 
     def __init__(self, on_pause_toggle=None, on_quit=None):
         self.paused = False
@@ -411,7 +420,7 @@ class SafetyListener:
                 try:
                     for event in dev.read():
                         self._handle(event)
-                except (OSError, evdev.error.EvdevError):
+                except (OSError, evdev.EvdevError):
                     continue
 
     def _handle(self, event):
@@ -435,13 +444,14 @@ class SafetyListener:
         alt = ecodes.KEY_LEFTALT in self._pressed or ecodes.KEY_RIGHTALT in self._pressed
 
         if ctrl and alt and not self._hotkey_fired:
-            if ecodes.KEY_S in self._pressed:
+            action = next((a for code, a in self.HOTKEY_CODES.items() if code in self._pressed), None)
+            if action == "pause":
                 self._hotkey_fired = True
                 self.paused = not self.paused
                 log(f"Hotkey Ctrl+Alt+S -> {'PAUSED' if self.paused else 'RESUMED'}")
                 if self.on_pause_toggle:
                     self.on_pause_toggle(self.paused)
-            elif ecodes.KEY_Q in self._pressed:
+            elif action == "quit":
                 self._hotkey_fired = True
                 log("Hotkey Ctrl+Alt+Q -> quit requested")
                 self.should_quit = True

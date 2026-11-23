@@ -30,14 +30,14 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QAction, QBrush, QColor, QConicalGradient, QFont, QFontDatabase, QIcon,
-    QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap,
+    QFontMetrics, QLinearGradient, QPainter, QPalette, QPen,
     QRadialGradient,
 )
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QButtonGroup, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMenu, QPushButton,
-    QScrollArea, QSizePolicy, QSlider, QStackedWidget, QStyle,
+    QScrollArea, QSlider, QStackedWidget, QStyle,
     QStyledItemDelegate, QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
@@ -1158,7 +1158,7 @@ class MainWindow(QWidget):
             self.start()
 
     def start(self):
-        if not self.worker or self.status in ("running", "paused"):
+        if not self.worker or self.init_error or self.status in ("running", "paused"):
             return
         self.worker.set_paused(False)
         self.run_id = self.worker.start()
